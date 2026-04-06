@@ -128,12 +128,27 @@ function buildCleanText($) {
   return text;
 }
 
-async function callAI(prompt) {
-  if (gemini) {
-    const model = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
-    const result = await model.generateContent(prompt);
-    return result.response.text();
+const GEMINI_MODELS = ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-8b'];
+
+async function callGemini(prompt) {
+  for (const modelName of GEMINI_MODELS) {
+    try {
+      const model = gemini.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      return result.response.text();
+    } catch (err) {
+      const isQuota = err.message?.includes('429') || err.message?.includes('quota') || err.message?.includes('RESOURCE_EXHAUSTED');
+      if (isQuota && GEMINI_MODELS.indexOf(modelName) < GEMINI_MODELS.length - 1) {
+        console.log(`⚠️  ${modelName} sem cota, tentando próximo modelo...`);
+        continue;
+      }
+      throw err;
+    }
   }
+}
+
+async function callAI(prompt) {
+  if (gemini) return callGemini(prompt);
   if (openai) {
     const resp = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -148,11 +163,7 @@ async function callAI(prompt) {
 }
 
 async function callAIAnalysis(prompt) {
-  if (gemini) {
-    const model = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
-    const result = await model.generateContent(prompt);
-    return result.response.text();
-  }
+  if (gemini) return callGemini(prompt);
   if (openai) {
     const resp = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
