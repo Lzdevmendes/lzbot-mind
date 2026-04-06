@@ -5,233 +5,306 @@ const path = require('path');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const Anthropic = require('@anthropic-ai/sdk');
-const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 let anthropic = null;
-let openai = null;
+let gemini = null;
 
 if (process.env.ANTHROPIC_API_KEY) {
   anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   console.log('✅ Claude (Anthropic) configurado');
 }
 
-if (process.env.OPENAI_API_KEY) {
-  openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  console.log('✅ OpenAI configurado');
+if (process.env.GEMINI_API_KEY) {
+  gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  console.log('✅ Gemini (Google) configurado');
 }
+
+const AXIOS_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+};
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.get('/api/ai-status', (_req, res) => {
+  const provider = gemini ? 'gemini' : (anthropic ? 'claude' : 'none');
   res.json({
     success: true,
     data: {
+      gemini: { available: !!gemini, status: gemini ? 'Ativo (Gratuito)' : 'Não configurado' },
       claude: { available: !!anthropic, status: anthropic ? 'Ativo' : 'Não configurado' },
-      openai: { available: !!openai, status: openai ? 'Ativo' : 'Não configurado' },
-      recommended: anthropic ? 'claude' : (openai ? 'openai' : 'none')
+      recommended: provider
     }
   });
 });
 
-app.post('/api/extract', async (req, res) => {
-  const { url, aiProvider = 'claude' } = req.body;
+function isSize(val) {
+  return /^\d{2,3}$|^[pPmMgG]{1,3}$|^PP$|^GG$|^XG$|^XXG$|^XS$|^XL$|^XXL$/.test(val.trim());
+}
 
-  if (!url) {
-    return res.status(400).json({ success: false, error: 'URL é obrigatória' });
-  }
-
+async function tryShopifyApi(url) {
   try {
-    new URL(url);
+    const parsed = new URL(url);
+    const apiUrl = `${parsed.protocol}//${parsed.hostname}/products.json?limit=250`;
+    const resp = await axios.get(apiUrl, { headers: AXIOS_HEADERS, timeout: 15000 });
+    if (!resp.data?.products?.length) return null;
+
+    return resp.data.products.map(p => {
+      const variants = p.variants || [];
+      const prices = variants.map(v => parseFloat(v.price)).filter(Boolean);
+      const minP = prices.length ? Math.min(...prices) : 0;
+      const maxP = prices.length ? Math.max(...prices) : 0;
+      const priceStr = !minP ? '' : minP === maxP
+        ? `R$ ${minP.toFixed(2).replace('.', ',')}`
+        : `R$ ${minP.toFixed(2).replace('.', ',')} – R$ ${maxP.toFixed(2).replace('.', ',')}`;
+
+      const colorOpt = (p.options || []).find(o => /cor|color/i.test(o.name));
+      const sizeOpt = (p.options || []).find(o => /tamanho|size|tam\b/i.test(o.name));
+      const allOpts = [...new Set(variants.map(v => v.option1 || '').filter(Boolean))];
+
+      return {
+        title: p.title || '',
+        price: priceStr,
+        originalPrice: null,
+        discount: null,
+        colors: colorOpt ? colorOpt.values : allOpts.filter(v => !isSize(v)),
+        sizes: sizeOpt ? sizeOpt.values : allOpts.filter(v => isSize(v)),
+        image: p.images?.[0]?.src || null,
+        link: `${parsed.protocol}//${parsed.hostname}/products/${p.handle}`,
+        description: (p.body_html || '').replace(/<[^>]*>/g, '').trim().substring(0, 150),
+        available: variants.some(v => v.available),
+        category: p.product_type || null
+      };
+    }).filter(p => p.title);
   } catch {
-    return res.status(400).json({ success: false, error: 'URL inválida. Verifique o formato.' });
+    return null;
+  }
+}
+
+function extractJsonLd($) {
+  const products = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const data = JSON.parse($(el).html());
+      const items = Array.isArray(data) ? data : [data];
+      items.forEach(item => {
+        if (item['@type'] === 'Product') {
+          const offers = Array.isArray(item.offers) ? item.offers : [item.offers || {}];
+          const prices = offers.map(o => parseFloat(o.price)).filter(Boolean);
+          const minP = prices.length ? Math.min(...prices) : 0;
+          products.push({
+            title: item.name || '',
+            price: minP ? `R$ ${minP.toFixed(2).replace('.', ',')}` : '',
+            originalPrice: null, discount: null, colors: [], sizes: [],
+            image: typeof item.image === 'string' ? item.image : (item.image?.[0] || null),
+            link: item.url || null,
+            description: (item.description || '').replace(/<[^>]*>/g, '').substring(0, 150),
+            available: offers.some(o => (o.availability || '').includes('InStock')),
+            category: item.category || null
+          });
+        }
+      });
+    } catch {}
+  });
+  return products;
+}
+
+function buildCleanText($) {
+  $('script, style, nav, footer, iframe, noscript, svg, header, aside').remove();
+  $('[class*="cookie"],[class*="popup"],[class*="chat"],[class*="banner"],[id*="cookie"]').remove();
+  let text = $('body').text().replace(/\s+/g, ' ').trim();
+  if (text.length > 45000) text = text.substring(0, 45000);
+  return text;
+}
+
+async function callAI(prompt) {
+  // Prefer Gemini (free), fallback to Claude
+  if (gemini) {
+    const model = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  }
+  if (anthropic) {
+    const resp = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    return resp.content[0].text;
+  }
+  throw new Error('Nenhuma IA configurada. Adicione GEMINI_API_KEY no arquivo .env');
+}
+
+async function callAIAnalysis(prompt) {
+  if (gemini) {
+    const model = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  }
+  if (anthropic) {
+    const resp = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 1200,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    return resp.content[0].text;
+  }
+  throw new Error('Nenhuma IA configurada');
+}
+
+app.post('/api/extract', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) return res.status(400).json({ success: false, error: 'URL é obrigatória' });
+
+  try { new URL(url); } catch {
+    return res.status(400).json({ success: false, error: 'URL inválida' });
   }
 
-  const client = aiProvider === 'openai' ? openai : anthropic;
-  if (!client) {
+  if (!gemini && !anthropic) {
     return res.status(400).json({
       success: false,
-      error: `${aiProvider === 'openai' ? 'OpenAI' : 'Claude'} não configurado. Adicione a chave no arquivo .env`
+      error: 'Nenhuma IA configurada. Adicione GEMINI_API_KEY (gratuito) no .env. Obtenha em aistudio.google.com',
+      code: 'NO_AI'
     });
   }
 
-  let html;
-  try {
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-      },
-      timeout: 20000,
-      maxRedirects: 5
-    });
-
-    const $ = cheerio.load(response.data);
-    $('script, style, nav, footer, iframe, noscript, svg, header').remove();
-    $('[class*="cookie"], [class*="popup"], [class*="modal"], [id*="cookie"]').remove();
-
-    html = $('body').html() || response.data;
-    if (html.length > 60000) html = html.substring(0, 60000);
-
-  } catch (fetchError) {
-    if (fetchError.code === 'ENOTFOUND' || fetchError.code === 'ECONNREFUSED') {
-      return res.status(400).json({ success: false, error: 'Não foi possível acessar o site. Verifique a URL.' });
-    }
-    if (fetchError.response?.status === 403) {
-      return res.status(400).json({ success: false, error: 'Acesso negado pelo site (proteção anti-bot).' });
-    }
-    return res.status(400).json({ success: false, error: `Erro ao acessar o site: ${fetchError.message}` });
-  }
-
-  const prompt = `Você é um especialista em extração de dados de e-commerce. Analise o HTML abaixo de "${url}" e extraia TODOS os produtos disponíveis na página.
-
-Para cada produto extraia:
-- title: nome completo do produto (string)
-- price: preço atual formatado (string, ex: "R$ 99,90")
-- originalPrice: preço original antes do desconto (string ou null)
-- discount: percentual de desconto se existir (número ou null, ex: 20)
-- colors: array de cores disponíveis (array de strings, ex: ["Preto", "Branco"])
-- sizes: array de tamanhos disponíveis (array de strings, ex: ["P", "M", "G", "42", "43"])
-- image: URL absoluta da imagem principal do produto (string ou null)
-- link: URL absoluta do produto (string ou null)
-- description: descrição resumida máximo 150 caracteres (string)
-- available: se está disponível para compra (boolean)
-- category: categoria do produto se identificável (string ou null)
-
-REGRAS IMPORTANTES:
-- Retorne SOMENTE JSON válido, sem markdown ou explicações
-- Se não encontrar produtos, retorne {"products":[],"pageTitle":"","totalFound":0}
-- Links e imagens devem ser URLs absolutas (use "${url}" como base se necessário)
-- Não invente dados, só extraia o que está no HTML
-
-Formato obrigatório:
-{"products":[...],"pageTitle":"título da página","totalFound":número}
-
-HTML:
-${html}`;
-
-  try {
-    let extracted;
-
-    if (aiProvider === 'openai' && openai) {
-      const aiResponse = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 4000,
-        temperature: 0.1,
-        response_format: { type: 'json_object' }
-      });
-      extracted = JSON.parse(aiResponse.choices[0].message.content);
-    } else {
-      const aiResponse = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }]
-      });
-      const text = aiResponse.content[0].text;
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('Resposta da IA não contém JSON válido');
-      extracted = JSON.parse(jsonMatch[0]);
-    }
-
-    res.json({
-      success: true,
-      url,
-      data: extracted.products || [],
-      pageTitle: extracted.pageTitle || '',
-      totalFound: extracted.totalFound || (extracted.products?.length ?? 0),
-      provider: aiProvider === 'openai' ? 'openai' : 'claude',
+  // 1. Shopify JSON API
+  const shopifyProducts = await tryShopifyApi(url);
+  if (shopifyProducts?.length) {
+    return res.json({
+      success: true, url, data: shopifyProducts,
+      pageTitle: new URL(url).hostname,
+      totalFound: shopifyProducts.length,
+      provider: 'shopify-api',
       extractedAt: new Date().toISOString()
     });
+  }
 
-  } catch (aiError) {
-    if (aiError instanceof Anthropic.AuthenticationError) {
-      return res.status(401).json({ success: false, error: 'Chave da API inválida. Verifique o arquivo .env' });
+  // 2. Fetch HTML
+  let $, pageTitle;
+  try {
+    const resp = await axios.get(url, { headers: AXIOS_HEADERS, timeout: 20000, maxRedirects: 5 });
+    $ = cheerio.load(resp.data);
+    pageTitle = $('title').text().trim() || new URL(url).hostname;
+  } catch (err) {
+    if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+      return res.status(400).json({ success: false, error: 'Não foi possível acessar o site. Verifique a URL.' });
     }
-    if (aiError instanceof Anthropic.RateLimitError) {
-      return res.status(429).json({ success: false, error: 'Limite de requisições atingido. Aguarde um momento.' });
+    if (err.response?.status === 403) {
+      return res.status(400).json({ success: false, error: 'Site bloqueou o acesso (proteção anti-bot).' });
     }
-    console.error('AI extraction error:', aiError.message);
-    res.status(500).json({ success: false, error: 'Erro na extração com IA: ' + aiError.message });
+    return res.status(400).json({ success: false, error: `Erro ao acessar: ${err.message}` });
+  }
+
+  // 3. JSON-LD structured data
+  const ldProducts = extractJsonLd($);
+  if (ldProducts.length) {
+    return res.json({
+      success: true, url, data: ldProducts, pageTitle,
+      totalFound: ldProducts.length, provider: 'json-ld',
+      extractedAt: new Date().toISOString()
+    });
+  }
+
+  // 4. AI extraction
+  const cleanText = buildCleanText($);
+
+  const prompt = `Você é especialista em extração de dados de e-commerce de moda e calçados.
+
+Analise o conteúdo da página "${url}" e extraia TODOS os produtos.
+
+Para cada produto retorne:
+- title: nome do produto
+- price: preço atual em reais (ex: "R$ 89,90") ou string vazia
+- originalPrice: preço antes do desconto ou null
+- discount: % de desconto (número) ou null
+- colors: cores disponíveis em português ["Preto","Branco","Rosa","Vermelho","Azul","Verde","Amarelo","Bege","Nude","Cinza","Roxo","Laranja","Marrom","Vinho"]
+- sizes: tamanhos ["P","M","G","GG"] ou numeração ["36","37","38"] ou vazio
+- image: URL da imagem ou null
+- link: URL do produto ou null
+- description: descrição curta (máx 120 chars)
+- available: true/false
+- category: "Vestido","Blusa","Calça","Tênis","Sandália","Bota","Acessório","Lingerie" ou null
+
+Retorne SOMENTE JSON válido:
+{"products":[...],"pageTitle":"...","totalFound":número}
+
+CONTEÚDO:
+${cleanText}`;
+
+  try {
+    const text = await callAI(prompt);
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Resposta inválida da IA');
+
+    const extracted = JSON.parse(jsonMatch[0]);
+    const products = extracted.products || [];
+
+    res.json({
+      success: true, url, data: products,
+      pageTitle: extracted.pageTitle || pageTitle,
+      totalFound: products.length, provider: gemini ? 'gemini' : 'claude',
+      extractedAt: new Date().toISOString()
+    });
+  } catch (aiErr) {
+    console.error('AI error:', aiErr.message);
+
+    if (aiErr.message?.includes('credit') || aiErr.message?.includes('quota')) {
+      return res.status(402).json({
+        success: false,
+        error: 'Cota/créditos esgotados. Use GEMINI_API_KEY (gratuito) em aistudio.google.com',
+        code: 'QUOTA_EXCEEDED'
+      });
+    }
+
+    res.status(500).json({ success: false, error: 'Erro na extração: ' + aiErr.message });
   }
 });
 
 app.post('/api/analyze', async (req, res) => {
-  const { productData, aiProvider = 'claude' } = req.body;
+  const { productData } = req.body;
+  if (!productData?.title) return res.status(400).json({ success: false, error: 'Dados do produto são obrigatórios' });
+  if (!gemini && !anthropic) return res.status(400).json({ success: false, error: 'Nenhuma IA configurada' });
 
-  if (!productData?.title) {
-    return res.status(400).json({ success: false, error: 'Dados do produto são obrigatórios' });
-  }
-
-  const client = aiProvider === 'openai' ? openai : anthropic;
-  if (!client) {
-    return res.status(400).json({ success: false, error: `${aiProvider === 'openai' ? 'OpenAI' : 'Claude'} não configurado` });
-  }
-
-  const colorInfo = productData.colors?.length ? `Cores: ${productData.colors.join(', ')}` : '';
-  const sizeInfo = productData.sizes?.length ? `Tamanhos: ${productData.sizes.join(', ')}` : '';
-  const discountInfo = productData.discount ? `Desconto: ${productData.discount}%` : '';
-
-  const prompt = `Analise este produto para um consumidor brasileiro e forneça insights práticos:
+  const prompt = `Analise este produto para um consumidor brasileiro:
 
 Produto: ${productData.title}
 Preço: ${productData.price || 'N/A'}
 ${productData.originalPrice ? `Preço Original: ${productData.originalPrice}` : ''}
-${discountInfo}
-${colorInfo}
-${sizeInfo}
+${productData.discount ? `Desconto: ${productData.discount}%` : ''}
+${productData.colors?.length ? `Cores: ${productData.colors.join(', ')}` : ''}
+${productData.sizes?.length ? `Tamanhos: ${productData.sizes.join(', ')}` : ''}
+${productData.category ? `Categoria: ${productData.category}` : ''}
 ${productData.description ? `Descrição: ${productData.description}` : ''}
 
-Forneça uma análise em português com:
+Forneça em português:
 1. 💰 Análise de preço e custo-benefício
-2. 🎯 Para quem é ideal este produto
-3. ✅ Principais pontos positivos
-4. ⚠️ Pontos de atenção antes de comprar
+2. 🎯 Para quem é ideal
+3. ✅ Pontos positivos
+4. ⚠️ Atenção antes de comprar
 5. 💡 Dica de compra
-6. 🏆 Pontuação geral: X/10
-
-Seja objetivo, prático e útil para quem vai comprar.`;
+6. 🏆 Pontuação: X/10`;
 
   try {
-    let analysis;
-
-    if (aiProvider === 'openai' && openai) {
-      const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 1200,
-        temperature: 0.7
-      });
-      analysis = response.choices[0].message.content;
-    } else {
-      const response = await anthropic.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 1200,
-        messages: [{ role: 'user', content: prompt }]
-      });
-      analysis = response.content[0].text;
-    }
-
+    const analysis = await callAIAnalysis(prompt);
     res.json({
       success: true,
-      data: { analysis, product: productData, provider: aiProvider, timestamp: new Date().toISOString() }
+      data: { analysis, product: productData, provider: gemini ? 'gemini' : 'claude', timestamp: new Date().toISOString() }
     });
-
-  } catch (error) {
-    if (error instanceof Anthropic.AuthenticationError) {
-      return res.status(401).json({ success: false, error: 'Chave da API inválida' });
-    }
-    console.error('Analysis error:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

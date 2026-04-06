@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@google/generative-ai": "^0.24.1",
     "axios": "^1.6.2",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
@@ -20,7 +21,14 @@
   "devDependencies": {
     "nodemon": "^3.0.2"
   },
-  "keywords": ["nodejs", "express", "scraping", "ai", "products", "claude"],
+  "keywords": [
+    "nodejs",
+    "express",
+    "scraping",
+    "ai",
+    "products",
+    "claude"
+  ],
   "author": "Lzmen",
   "license": "MIT"
 }

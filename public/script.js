@@ -16,14 +16,13 @@ async function loadAiStatus() {
     const result = await api('/ai-status');
     if (!result.success) return;
     const badge = $('aiStatusBadge');
-    const { claude, openai } = result.data;
-    if (claude.available) {
+    const { gemini, claude } = result.data;
+    if (gemini?.available) {
+      badge.textContent = 'Gemini ativo (grátis)';
+      badge.className = 'ai-badge active';
+    } else if (claude?.available) {
       badge.textContent = 'Claude ativo';
       badge.className = 'ai-badge active';
-    } else if (openai.available) {
-      badge.textContent = 'OpenAI ativo';
-      badge.className = 'ai-badge active';
-      $('aiProvider').value = 'openai';
     } else {
       badge.textContent = 'IA não configurada';
       badge.className = 'ai-badge inactive';
@@ -40,11 +39,10 @@ async function extractProducts() {
     return;
   }
 
-  const provider = $('aiProvider').value;
   setLoading(true, 'Buscando produtos com IA...');
 
   try {
-    const result = await api('/extract', { url, aiProvider: provider });
+    const result = await api('/extract', { url });
 
     if (!result.success) {
       showToast(result.error || 'Erro na extração', 'error');
@@ -69,8 +67,8 @@ async function extractProducts() {
     resetFilters();
     applyFilters();
 
-    const providerLabel = provider === 'claude' ? 'Claude' : 'OpenAI';
-    showToast(`${allProducts.length} produtos extraídos via ${providerLabel}`, 'success');
+    const providerLabel = { gemini: 'Gemini', claude: 'Claude', 'shopify-api': 'Shopify', 'json-ld': 'Schema' };
+    showToast(`${allProducts.length} produtos extraídos via ${providerLabel[result.provider] || 'IA'}`, 'success');
 
   } catch (err) {
     showToast('Erro de conexão. Tente novamente.', 'error');
@@ -306,8 +304,7 @@ async function analyzeProduct(product) {
     </div>`;
 
   try {
-    const provider = $('aiProvider').value;
-    const result = await api('/analyze', { productData: product, aiProvider: provider });
+    const result = await api('/analyze', { productData: product });
 
     if (result.success) {
       $('analysisContent').innerHTML = `
