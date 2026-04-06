@@ -1,104 +1,136 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LzBot StarMind - Análise de Produtos com IA</title>
-    <link rel="stylesheet" href="style.css">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>LzBot StarMind</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <div class="logo">
-                <i class="fas fa-brain"></i>
-                <h1>LzBot StarMind</h1>
-            </div>
-            <p class="subtitle">Análise inteligente de produtos com IA</p>
-        </header>
 
-        <!-- Loading Overlay -->
-        <div id="loadingOverlay" class="loading-overlay">
-            <div class="spinner"></div>
-            <p>Processando...</p>
-        </div>
-
-        <!-- Main Content -->
-        <main class="main-content">
-            <!-- Control Panel -->
-            <section class="control-panel">
-                <div class="controls">
-                    <button id="refreshBtn" class="btn btn-primary">
-                        <i class="fas fa-sync-alt"></i>
-                        Atualizar Lista
-                    </button>
-                    <select id="aiProvider" class="select">
-                        <option value="openai">OpenAI GPT</option>
-                    </select>
-                </div>
-                
-                <div class="search-box">
-                    <input type="text" id="searchInput" placeholder="Buscar produtos..." class="search-input">
-                    <button id="searchBtn" class="btn btn-search">
-                        <i class="fas fa-search"></i>
-                    </button>
-                </div>
-            </section>
-
-            <!-- Stats Panel -->
-            <section id="statsPanel" class="stats-panel">
-                <div class="stat-card">
-                    <i class="fas fa-boxes"></i>
-                    <div>
-                        <span class="stat-value" id="totalProducts">0</span>
-                        <span class="stat-label">Total de Produtos</span>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <i class="fas fa-sync-alt"></i>
-                    <div>
-                        <span class="stat-value" id="lastScrape">Nunca</span>
-                        <span class="stat-label">Última Atualização</span>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Products Grid -->
-            <section class="products-section">
-                <h2>Produtos Disponíveis</h2>
-                <div id="productsGrid" class="products-grid">
-                    <div class="empty-state">
-                        <i class="fas fa-box-open"></i>
-                        <h3>Carregando produtos...</h3>
-                        <p>Aguarde enquanto os produtos são carregados</p>
-                    </div>
-                </div>
-            </section>
-        </main>
-
-        <!-- Modal para análise de produto -->
-        <div id="analysisModal" class="modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h3>Análise do Produto</h3>
-                    <button class="modal-close">&times;</button>
-                </div>
-                <div class="modal-body">
-                    <div id="analysisContent">
-                        <div class="analysis-loading">
-                            <div class="spinner-small"></div>
-                            <p>Analisando produto com IA...</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Toast para notificações -->
-        <div id="toast" class="toast"></div>
+  <div id="loadingOverlay" class="loading-overlay hidden">
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <p id="loadingText">Extraindo produtos...</p>
     </div>
+  </div>
 
-    <script src="script.js"></script>
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <i class="fas fa-brain"></i>
+        <span>LzBot <strong>StarMind</strong></span>
+      </div>
+      <div id="aiStatusBadge" class="ai-badge"></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Extraia dados de <span class="highlight">qualquer loja</span></h1>
+      <p class="hero-sub">Cole o link de qualquer site e a IA traz preços, tamanhos, cores e disponibilidade</p>
+
+      <div class="url-form">
+        <div class="url-input-wrap">
+          <i class="fas fa-link url-icon"></i>
+          <input
+            type="url"
+            id="urlInput"
+            placeholder="https://loja.com/categoria ou produto..."
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck="false"
+          >
+          <button id="clearUrl" class="clear-btn hidden"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="form-row">
+          <select id="aiProvider" class="provider-select">
+            <option value="claude">Claude (Recomendado)</option>
+            <option value="openai">OpenAI GPT</option>
+          </select>
+          <button id="extractBtn" class="btn-extract">
+            <i class="fas fa-search-dollar"></i>
+            <span>Extrair</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="quick-tips">
+        <span>Funciona com:</span>
+        <span class="tip-tag">Shopify</span>
+        <span class="tip-tag">WooCommerce</span>
+        <span class="tip-tag">Qualquer loja</span>
+      </div>
+    </section>
+
+    <section id="resultsSection" class="results-section hidden">
+      <div class="results-header">
+        <div class="results-meta">
+          <span id="resultsCount" class="results-count"></span>
+          <span id="pageTitle" class="page-title"></span>
+        </div>
+        <button id="newSearchBtn" class="btn-new-search">
+          <i class="fas fa-arrow-left"></i> Nova busca
+        </button>
+      </div>
+
+      <div class="filters-bar">
+        <div class="filter-group">
+          <div class="search-filter">
+            <i class="fas fa-search"></i>
+            <input type="text" id="searchFilter" placeholder="Buscar produto...">
+          </div>
+        </div>
+
+        <div class="filter-group" id="colorFilterGroup" style="display:none">
+          <label>Cores</label>
+          <div id="colorFilters" class="chip-group"></div>
+        </div>
+
+        <div class="filter-group" id="sizeFilterGroup" style="display:none">
+          <label>Tamanhos</label>
+          <div id="sizeFilters" class="chip-group"></div>
+        </div>
+
+        <div class="filter-group" id="priceFilterGroup" style="display:none">
+          <label>Preço</label>
+          <div class="price-range">
+            <input type="number" id="minPrice" placeholder="Mín" min="0">
+            <span>—</span>
+            <input type="number" id="maxPrice" placeholder="Máx" min="0">
+          </div>
+        </div>
+
+        <button id="clearFilters" class="btn-clear-filters hidden">
+          <i class="fas fa-times"></i> Limpar filtros
+        </button>
+      </div>
+
+      <div id="productsGrid" class="products-grid"></div>
+    </section>
+
+    <section id="emptyState" class="empty-state-initial hidden">
+      <i class="fas fa-box-open"></i>
+      <h3>Nenhum produto encontrado</h3>
+      <p>A IA não encontrou produtos nesta página. Tente outra URL.</p>
+    </section>
+  </main>
+
+  <div id="analysisModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+      <div class="modal-header">
+        <h3><i class="fas fa-brain"></i> Análise IA</h3>
+        <button class="modal-close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body" id="analysisContent"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="script.js"></script>
 </body>
 </html>

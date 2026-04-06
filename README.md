@@ -1,4 +1,4 @@
-# LzBot StarMind
+]# LzBot StarMind
 
 Sistema web completo para análise de produtos com IA e web scraping.
 
@@ -22,6 +22,7 @@ Acesse `http://localhost:3000`
 ## Deploy
 
 Configure as variáveis:
+
 - `OPENAI_API_KEY`: Sua chave da OpenAI
 - `PORT`: Porta do servidor (padrão: 3000)
 
