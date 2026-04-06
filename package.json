@@ -1,5 +1,5 @@
 {
-  "name": "lzbot-starmind",
+  "name": "lzbot-mind",
   "version": "2.0.0",
   "description": "Extração inteligente de produtos de qualquer site com IA",
   "main": "server.js",

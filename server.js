@@ -4,23 +4,23 @@ const cors = require('cors');
 const path = require('path');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const Anthropic = require('@anthropic-ai/sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const OpenAI = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let anthropic = null;
 let gemini = null;
-
-if (process.env.ANTHROPIC_API_KEY) {
-  anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  console.log('✅ Claude (Anthropic) configurado');
-}
+let openai = null;
 
 if (process.env.GEMINI_API_KEY) {
   gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   console.log('✅ Gemini (Google) configurado');
+}
+
+if (process.env.OPENAI_API_KEY) {
+  openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  console.log('✅ OpenAI configurado');
 }
 
 const AXIOS_HEADERS = {
@@ -38,12 +38,12 @@ app.get('/', (_req, res) => {
 });
 
 app.get('/api/ai-status', (_req, res) => {
-  const provider = gemini ? 'gemini' : (anthropic ? 'claude' : 'none');
+  const provider = gemini ? 'gemini' : (openai ? 'openai' : 'none');
   res.json({
     success: true,
     data: {
       gemini: { available: !!gemini, status: gemini ? 'Ativo (Gratuito)' : 'Não configurado' },
-      claude: { available: !!anthropic, status: anthropic ? 'Ativo' : 'Não configurado' },
+      openai: { available: !!openai, status: openai ? 'Ativo' : 'Não configurado' },
       recommended: provider
     }
   });
@@ -129,19 +129,20 @@ function buildCleanText($) {
 }
 
 async function callAI(prompt) {
-  // Prefer Gemini (free), fallback to Claude
   if (gemini) {
     const model = gemini.getGenerativeModel({ model: 'gemini-2.0-flash' });
     const result = await model.generateContent(prompt);
     return result.response.text();
   }
-  if (anthropic) {
-    const resp = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+  if (openai) {
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: 4000,
-      messages: [{ role: 'user', content: prompt }]
+      temperature: 0.1,
+      response_format: { type: 'json_object' }
     });
-    return resp.content[0].text;
+    return resp.choices[0].message.content;
   }
   throw new Error('Nenhuma IA configurada. Adicione GEMINI_API_KEY no arquivo .env');
 }
@@ -152,13 +153,14 @@ async function callAIAnalysis(prompt) {
     const result = await model.generateContent(prompt);
     return result.response.text();
   }
-  if (anthropic) {
-    const resp = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
+  if (openai) {
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: 1200,
-      messages: [{ role: 'user', content: prompt }]
+      temperature: 0.7
     });
-    return resp.content[0].text;
+    return resp.choices[0].message.content;
   }
   throw new Error('Nenhuma IA configurada');
 }
@@ -172,7 +174,7 @@ app.post('/api/extract', async (req, res) => {
     return res.status(400).json({ success: false, error: 'URL inválida' });
   }
 
-  if (!gemini && !anthropic) {
+  if (!gemini && !openai) {
     return res.status(400).json({
       success: false,
       error: 'Nenhuma IA configurada. Adicione GEMINI_API_KEY (gratuito) no .env. Obtenha em aistudio.google.com',
@@ -180,7 +182,6 @@ app.post('/api/extract', async (req, res) => {
     });
   }
 
-  // 1. Shopify JSON API
   const shopifyProducts = await tryShopifyApi(url);
   if (shopifyProducts?.length) {
     return res.json({
@@ -192,7 +193,6 @@ app.post('/api/extract', async (req, res) => {
     });
   }
 
-  // 2. Fetch HTML
   let $, pageTitle;
   try {
     const resp = await axios.get(url, { headers: AXIOS_HEADERS, timeout: 20000, maxRedirects: 5 });
@@ -208,7 +208,6 @@ app.post('/api/extract', async (req, res) => {
     return res.status(400).json({ success: false, error: `Erro ao acessar: ${err.message}` });
   }
 
-  // 3. JSON-LD structured data
   const ldProducts = extractJsonLd($);
   if (ldProducts.length) {
     return res.json({
@@ -218,7 +217,6 @@ app.post('/api/extract', async (req, res) => {
     });
   }
 
-  // 4. AI extraction
   const cleanText = buildCleanText($);
 
   const prompt = `Você é especialista em extração de dados de e-commerce de moda e calçados.
@@ -255,20 +253,19 @@ ${cleanText}`;
     res.json({
       success: true, url, data: products,
       pageTitle: extracted.pageTitle || pageTitle,
-      totalFound: products.length, provider: gemini ? 'gemini' : 'claude',
+      totalFound: products.length,
+      provider: gemini ? 'gemini' : 'openai',
       extractedAt: new Date().toISOString()
     });
   } catch (aiErr) {
     console.error('AI error:', aiErr.message);
-
     if (aiErr.message?.includes('credit') || aiErr.message?.includes('quota')) {
       return res.status(402).json({
         success: false,
-        error: 'Cota/créditos esgotados. Use GEMINI_API_KEY (gratuito) em aistudio.google.com',
+        error: 'Cota esgotada. Use GEMINI_API_KEY (gratuito) em aistudio.google.com',
         code: 'QUOTA_EXCEEDED'
       });
     }
-
     res.status(500).json({ success: false, error: 'Erro na extração: ' + aiErr.message });
   }
 });
@@ -276,7 +273,7 @@ ${cleanText}`;
 app.post('/api/analyze', async (req, res) => {
   const { productData } = req.body;
   if (!productData?.title) return res.status(400).json({ success: false, error: 'Dados do produto são obrigatórios' });
-  if (!gemini && !anthropic) return res.status(400).json({ success: false, error: 'Nenhuma IA configurada' });
+  if (!gemini && !openai) return res.status(400).json({ success: false, error: 'Nenhuma IA configurada' });
 
   const prompt = `Analise este produto para um consumidor brasileiro:
 
@@ -301,7 +298,7 @@ Forneça em português:
     const analysis = await callAIAnalysis(prompt);
     res.json({
       success: true,
-      data: { analysis, product: productData, provider: gemini ? 'gemini' : 'claude', timestamp: new Date().toISOString() }
+      data: { analysis, product: productData, provider: gemini ? 'gemini' : 'openai', timestamp: new Date().toISOString() }
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
